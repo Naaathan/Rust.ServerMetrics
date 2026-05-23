@@ -18,7 +18,7 @@ internal class ReportUploader : MonoBehaviour
     private readonly object _sendBufferLock = new object();
     private readonly StringBuilder _payloadBuilder = new();
 
-    private bool _isRunning;
+    private volatile bool _isRunning;
     private ushort _attempt;
     private byte[] _data;
     private Uri _uri;
@@ -76,6 +76,7 @@ internal class ReportUploader : MonoBehaviour
             Debug.LogError("[ServerMetrics] ReportUploader failed to find the MetricsLogger component");
             Destroy(this);
         }
+        StartCoroutine(SendBufferLoop());
     }
 
     public void AddToSendBuffer(string payload)
@@ -89,16 +90,6 @@ internal class ReportUploader : MonoBehaviour
 
             _sendBuffer.Enqueue(payload);
         }
-
-        if (System.Threading.Thread.CurrentThread.ManagedThreadId != RustServerMetricsLoader._mainThreadId)
-        {
-            return;
-        }
-
-        if (!_isRunning)
-        {
-            StartCoroutine(SendBufferLoop());
-        }
     }
 
     private IEnumerator SendBufferLoop()
@@ -106,10 +97,16 @@ internal class ReportUploader : MonoBehaviour
         _isRunning = true;
         yield return null;
 
-        int bufferSize;
-
-        while ((bufferSize = BufferSize) > 0 && _isRunning)
+        while (_isRunning)
         {
+            int bufferSize = BufferSize;
+
+            if (bufferSize == 0)
+            {
+                yield return CoroutineEx.waitForSecondsRealtime(1f);
+                continue;
+            }
+
             var amountToTake = Mathf.Min(bufferSize, BatchSize);
             for (var i = 0; i < amountToTake; i++)
             {

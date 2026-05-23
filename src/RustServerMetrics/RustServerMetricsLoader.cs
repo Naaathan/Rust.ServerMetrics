@@ -10,8 +10,6 @@ public class RustServerMetricsLoader : IHarmonyModHooks
     public static bool __serverStarted = false;
     
     public static Harmony __harmonyInstance;
-
-    public static int _mainThreadId;
     
     public static List<Harmony> __modTimeWarningsHarmonyInstances = [];
     
@@ -22,7 +20,6 @@ public class RustServerMetricsLoader : IHarmonyModHooks
             return;
         }
 
-        _mainThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId;
         MetricsLogger.Initialize();
 
         if (MetricsLogger.Instance != null)
