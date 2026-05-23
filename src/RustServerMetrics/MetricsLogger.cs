@@ -212,16 +212,23 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
         var net = BaseNetworkable.serverEntities.Find(entityId);
 
-        if (!net.IsValid())
-        {
-            return;
-        }
-
         UploadPacket("packet_profiler", net, (builder, entity) =>
         {
-            builder.Append(",entity_type=\"");
+            if (!entity.IsValid())
+            {
+                return;
+            }
+
+            string entityType = entity?.GetType()?.Name;
+
+            if (string.IsNullOrEmpty(entityType))
+            {
+                return;
+            }
+
+            builder.Append(",entity_type=");
             builder.Append(entity.GetType().Name);
-            builder.Append("\" entity_id=");
+            builder.Append(" entity_id=");
             builder.Append(entity.net.ID.Value);
             builder.Append("i");
         });

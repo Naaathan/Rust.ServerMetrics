@@ -18,7 +18,7 @@ namespace RustServerMetrics.HarmonyPatches
             int timestamp,
             string info)
         {
-            if (!PacketProfiler.detailedProfiling || direction != PacketProfilingData.PacketProfilingDirection.Outbound)
+            if (!PacketProfiler.detailedProfiling || direction != PacketProfilingData.PacketProfilingDirection.Outbound || type >= Message.Type.Count)
                 return;
 
             SingletonComponent<MetricsLogger>.Instance.OnPacketProfilerLogDetailed(entityId);
