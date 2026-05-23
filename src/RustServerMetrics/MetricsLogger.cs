@@ -188,7 +188,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         {
             return;
         }
-            
+
         var data = _networkUpdates[_lastMessageType];
         if (sendInfo.connection != null)
         {
@@ -201,6 +201,30 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
             data.Count += count;
             data.Bytes += write.Length * count;
         }
+    }
+
+    internal void OnPacketProfilerLogDetailed(NetworkableId entityId)
+    {
+        if (!Ready)
+        {
+            return;
+        }
+
+        var net = BaseNetworkable.serverEntities.Find(entityId);
+
+        if (!net.IsValid())
+        {
+            return;
+        }
+
+        UploadPacket("packet_profiler", net, (builder, entity) =>
+        {
+            builder.Append(",entity_type=\"");
+            builder.Append(entity.GetType().Name);
+            builder.Append("\" entity_id=");
+            builder.Append(entity.net.ID.Value);
+            builder.Append("i");
+        });
     }
 
     internal void OnOxidePluginMetrics(Dictionary<string, double> metrics)
