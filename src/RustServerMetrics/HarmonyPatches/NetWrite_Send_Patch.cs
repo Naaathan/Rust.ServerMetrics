@@ -12,6 +12,13 @@ public class NetWrite_Send_Patch
     public static void Prefix(NetWrite __instance, SendInfo info)
     {
         if (!MetricsLogger.IsReady) return;
-        SingletonComponent<MetricsLogger>.Instance.OnNetWriteSend(__instance, info);
+
+        int num = __instance.PeekPacketID();
+        if (num < 140) return;
+
+        int type = num - 140;
+        if (type >= 29) return;
+
+        SingletonComponent<MetricsLogger>.Instance.OnNetWriteSend(__instance, info, type);
     }
 }

@@ -1,4 +1,5 @@
-﻿using HarmonyLib;
+﻿using Facepunch;
+using HarmonyLib;
 using Network;
 using Newtonsoft.Json;
 using RustServerMetrics.Config;
@@ -9,6 +10,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 using UnityEngine;
 
 namespace RustServerMetrics;
@@ -16,9 +18,9 @@ namespace RustServerMetrics;
 public class MetricsLogger : SingletonComponent<MetricsLogger>
 {
     private const string ConfigurationPath = "HarmonyMods_Data/ServerMetrics/Configuration.json";
-    private readonly StringBuilder _stringBuilder = new();
     private readonly Dictionary<ulong, Action> _playerStatsActions = new();
     private readonly Dictionary<ulong, uint> _perfReportDelayCounter = new();
+    private readonly ThreadLocal<StringBuilder> _stringBuilder = new ThreadLocal<StringBuilder>(() => new StringBuilder(128));
 
     private class NetworkUpdateData
     {
@@ -63,7 +65,6 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
     private Uri _baseUri;
     private readonly int _performanceReportRequestId = UnityEngine.Random.Range(-2147483648, 2147483647);
     private ReportUploader _reportUploader;
-    private Message.Type _lastMessageType;
     private bool _firstReportGenerated;
     private int _lastFrameID;
     private System.Diagnostics.Process _currentProcess;
@@ -172,64 +173,41 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         _perfReportDelayCounter.Remove(player.userID);
     }
 
-    internal void OnNetWritePacketID(Message.Type messageType)
-    {
-        if (!Ready)
-        {
-            return;
-        }
-            
-        _lastMessageType = messageType;
-    }
-
-    internal void OnNetWriteSend(NetWrite write, SendInfo sendInfo)
+    internal void OnNetWriteSend(NetWrite write, SendInfo sendInfo, int type)
     {
         if (!Ready)
         {
             return;
         }
 
-        var data = _networkUpdates[_lastMessageType];
+        var data = _networkUpdates[(Message.Type)type];
         if (sendInfo.connection != null)
         {
-            data.Count++;
-            data.Bytes += write.Length;
+            Interlocked.Add(ref data.Count, 1);
+            Interlocked.Add(ref data.Bytes, write.Length);
         }
         else if (sendInfo.connections != null)
         {
             var count = sendInfo.connections.Count;
-            data.Count += count;
-            data.Bytes += write.Length * count;
+            Interlocked.Add(ref data.Count, count);
+            Interlocked.Add(ref data.Bytes, write.Length * count);
         }
     }
 
     internal void OnPacketProfilerLogDetailed(NetworkableId entityId)
     {
-        if (!Ready)
-        {
-            return;
-        }
-
+        if (!Ready) return;
         var net = BaseNetworkable.serverEntities.Find(entityId);
+        if (!net.IsValid()) return;
+        string entityType = net.GetType()?.Name;
+        if (string.IsNullOrEmpty(entityType)) return;
 
         UploadPacket("packet_profiler", net, (builder, entity) =>
         {
-            if (!entity.IsValid())
-            {
-                return;
-            }
-
-            string entityType = entity?.GetType()?.Name;
-
-            if (string.IsNullOrEmpty(entityType))
-            {
-                return;
-            }
-
             builder.Append(",entity_type=");
-            builder.Append(entity.GetType().Name);
+            builder.Append(entityType);
             builder.Append(" entity_id=");
-            builder.Append(entity.net.ID.Value);
+            builder.Append(entityId.Value);
             builder.Append("i");
         });
     }
@@ -308,10 +286,13 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         if (_networkUpdates.Count < 1) return;
         var serverTag = Configuration.ServerTag;
         var epochNow = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _stringBuilder.Clear();
-        _stringBuilder.Append("network_updates,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" ");
+
+        var stringBuilder = _stringBuilder.Value;
+
+        stringBuilder.Clear();
+        stringBuilder.Append("network_updates,server=");
+        stringBuilder.Append(serverTag);
+        stringBuilder.Append(" ");
 
         var enumerator = _networkUpdates.GetEnumerator();
         if (enumerator.MoveNext())
@@ -320,20 +301,18 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
             var key = MessageTypeNames[networkUpdate.Key];
             var value = networkUpdate.Value;
             // Count first named {type}
-            _stringBuilder.Append(key);
-            _stringBuilder.Append("=");
-            _stringBuilder.Append(value.Count);
-            _stringBuilder.Append("i");
-            value.Count = 0;
+            stringBuilder.Append(key);
+            stringBuilder.Append("=");
+            stringBuilder.Append(Interlocked.Exchange(ref value.Count, 0));
+            stringBuilder.Append("i");
 
             // Bytes second named as "{type}_bytes"
-            _stringBuilder.Append(",");
-            _stringBuilder.Append(key);
-            _stringBuilder.Append("_bytes");
-            _stringBuilder.Append("=");
-            _stringBuilder.Append(value.Bytes);
-            _stringBuilder.Append("i");
-            value.Bytes = 0;
+            stringBuilder.Append(",");
+            stringBuilder.Append(key);
+            stringBuilder.Append("_bytes");
+            stringBuilder.Append("=");
+            stringBuilder.Append(Interlocked.Exchange(ref value.Bytes, 0));
+            stringBuilder.Append("i");
 
             while (enumerator.MoveNext())
             {
@@ -342,27 +321,27 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
                 value = networkUpdate.Value;
 
                 // Count first named {type}
-                _stringBuilder.Append(",");
-                _stringBuilder.Append(key);
-                _stringBuilder.Append("=");
-                _stringBuilder.Append(value.Count);
-                _stringBuilder.Append("i");
-                value.Count = 0;
+                stringBuilder.Append(",");
+                stringBuilder.Append(key);
+                stringBuilder.Append("=");
+                stringBuilder.Append(Interlocked.Exchange(ref value.Count, 0));
+                stringBuilder.Append("i");
 
                 // Bytes second named as "{type}_bytes"
-                _stringBuilder.Append(",");
-                _stringBuilder.Append(key);
-                _stringBuilder.Append("_bytes");
-                _stringBuilder.Append("=");
-                _stringBuilder.Append(value.Bytes);
-                _stringBuilder.Append("i");
-                value.Bytes = 0;
+                stringBuilder.Append(",");
+                stringBuilder.Append(key);
+                stringBuilder.Append("_bytes");
+                stringBuilder.Append("=");
+                stringBuilder.Append(Interlocked.Exchange(ref value.Bytes, 0));
+                stringBuilder.Append("i");
             }
         }
 
-        _stringBuilder.Append(" ");
-        _stringBuilder.Append(epochNow);
-        _reportUploader.AddToSendBuffer(_stringBuilder.ToString());
+        stringBuilder.Append(" ");
+        stringBuilder.Append(epochNow);
+
+        string payload = stringBuilder.ToString();
+        _reportUploader.AddToSendBuffer(payload);
     }
 
     internal void OnPerformanceReportGenerated()
@@ -386,90 +365,92 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
     private void LogPerformanceReport(Performance.Tick current, string epochNow, string serverTag)
     {
-        _stringBuilder.Clear();
+        var stringBuilder = _stringBuilder.Value;
 
-        _stringBuilder.Append("framerate,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" instant=");
-        _stringBuilder.Append(current.frameRate);
-        _stringBuilder.Append(",average=");
-        _stringBuilder.Append(current.frameRateAverage);
-        _stringBuilder.Append(" ");
-        _stringBuilder.Append(epochNow);
-        _stringBuilder.Append("\n");
+        stringBuilder.Clear();
+        stringBuilder.Append("framerate,server=");
+        stringBuilder.Append(serverTag);
+        stringBuilder.Append(" instant=");
+        stringBuilder.Append(current.frameRate);
+        stringBuilder.Append(",average=");
+        stringBuilder.Append(current.frameRateAverage);
+        stringBuilder.Append(" ");
+        stringBuilder.Append(epochNow);
+        stringBuilder.Append("\n");
 
-        _stringBuilder.Append("frametime,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" instant=");
-        _stringBuilder.Append(current.frameTime);
-        _stringBuilder.Append(",average=");
-        _stringBuilder.Append(current.frameTimeAverage);
-        _stringBuilder.Append(" ");
-        _stringBuilder.Append(epochNow);
-        _stringBuilder.Append("\n");
+        stringBuilder.Append("frametime,server=");
+        stringBuilder.Append(serverTag);
+        stringBuilder.Append(" instant=");
+        stringBuilder.Append(current.frameTime);
+        stringBuilder.Append(",average=");
+        stringBuilder.Append(current.frameTimeAverage);
+        stringBuilder.Append(" ");
+        stringBuilder.Append(epochNow);
+        stringBuilder.Append("\n");
 
-        _stringBuilder.Append("memory,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" used=");
-        _stringBuilder.Append(GetMemoryUsage(current));
-        _stringBuilder.Append("i,collections=");
-        _stringBuilder.Append(current.memoryCollections);
-        _stringBuilder.Append("i,allocations=");
-        _stringBuilder.Append(current.memoryAllocations);
-        _stringBuilder.Append("i,gc=");
-        _stringBuilder.Append(current.gcTriggered);
-        _stringBuilder.Append(" ");
-        _stringBuilder.Append(epochNow);
-        _stringBuilder.Append("\n");
+        stringBuilder.Append("memory,server=");
+        stringBuilder.Append(serverTag);
+        stringBuilder.Append(" used=");
+        stringBuilder.Append(GetMemoryUsage(current));
+        stringBuilder.Append("i,collections=");
+        stringBuilder.Append(current.memoryCollections);
+        stringBuilder.Append("i,allocations=");
+        stringBuilder.Append(current.memoryAllocations);
+        stringBuilder.Append("i,gc=");
+        stringBuilder.Append(current.gcTriggered);
+        stringBuilder.Append(" ");
+        stringBuilder.Append(epochNow);
+        stringBuilder.Append("\n");
 
-        _stringBuilder.Append("tasks,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" load_balancer=");
-        _stringBuilder.Append(current.loadBalancerTasks);
-        _stringBuilder.Append("i,invoke_handler=");
-        _stringBuilder.Append(current.invokeHandlerTasks);
-        _stringBuilder.Append("i,workshop_skins_queue=");
-        _stringBuilder.Append(current.workshopSkinsQueued);
-        _stringBuilder.Append("i ");
-        _stringBuilder.Append(epochNow);
-        _stringBuilder.Append("\n");
+        stringBuilder.Append("tasks,server=");
+        stringBuilder.Append(serverTag);
+        stringBuilder.Append(" load_balancer=");
+        stringBuilder.Append(current.loadBalancerTasks);
+        stringBuilder.Append("i,invoke_handler=");
+        stringBuilder.Append(current.invokeHandlerTasks);
+        stringBuilder.Append("i,workshop_skins_queue=");
+        stringBuilder.Append(current.workshopSkinsQueued);
+        stringBuilder.Append("i ");
+        stringBuilder.Append(epochNow);
+        stringBuilder.Append("\n");
 
         var bytesReceivedLastSecond = Net.sv.GetStat(null, BaseNetwork.StatTypeLong.BytesReceived_LastSecond);
         var bytesSentLastSecond = Net.sv.GetStat(null, BaseNetwork.StatTypeLong.BytesSent_LastSecond);
         var packetLossLastSecond = Net.sv.GetStat(null, BaseNetwork.StatTypeLong.PacketLossLastSecond);
 
-        _stringBuilder.Append("network,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" bytes_received=");
-        _stringBuilder.Append(bytesReceivedLastSecond);
-        _stringBuilder.Append("i,bytes_sent=");
-        _stringBuilder.Append(bytesSentLastSecond);
-        _stringBuilder.Append("i,packet_loss=");
-        _stringBuilder.Append(packetLossLastSecond);
-        _stringBuilder.Append("i ");
-        _stringBuilder.Append(epochNow);
-        _stringBuilder.Append("\n");
+        stringBuilder.Append("network,server=");
+        stringBuilder.Append(serverTag);
+        stringBuilder.Append(" bytes_received=");
+        stringBuilder.Append(bytesReceivedLastSecond);
+        stringBuilder.Append("i,bytes_sent=");
+        stringBuilder.Append(bytesSentLastSecond);
+        stringBuilder.Append("i,packet_loss=");
+        stringBuilder.Append(packetLossLastSecond);
+        stringBuilder.Append("i ");
+        stringBuilder.Append(epochNow);
+        stringBuilder.Append("\n");
 
-        _stringBuilder.Append("players,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" count=");
-        _stringBuilder.Append(BasePlayer.activePlayerList.Count);
-        _stringBuilder.Append("i,joining=");
-        _stringBuilder.Append(ServerMgr.Instance.connectionQueue.Joining);
-        _stringBuilder.Append("i,queued=");
-        _stringBuilder.Append(ServerMgr.Instance.connectionQueue.Queued);
-        _stringBuilder.Append("i ");
-        _stringBuilder.Append(epochNow);
-        _stringBuilder.Append("\n");
+        stringBuilder.Append("players,server=");
+        stringBuilder.Append(serverTag);
+        stringBuilder.Append(" count=");
+        stringBuilder.Append(BasePlayer.activePlayerList.Count);
+        stringBuilder.Append("i,joining=");
+        stringBuilder.Append(ServerMgr.Instance.connectionQueue.Joining);
+        stringBuilder.Append("i,queued=");
+        stringBuilder.Append(ServerMgr.Instance.connectionQueue.Queued);
+        stringBuilder.Append("i ");
+        stringBuilder.Append(epochNow);
+        stringBuilder.Append("\n");
 
-        _stringBuilder.Append("entities,server=");
-        _stringBuilder.Append(serverTag);
-        _stringBuilder.Append(" count=");
-        _stringBuilder.Append(BaseNetworkable.serverEntities.Count);
-        _stringBuilder.Append("i ");
-        _stringBuilder.Append(epochNow);
+        stringBuilder.Append("entities,server=");
+        stringBuilder.Append(serverTag);
+        stringBuilder.Append(" count=");
+        stringBuilder.Append(BaseNetworkable.serverEntities.Count);
+        stringBuilder.Append("i ");
+        stringBuilder.Append(epochNow);
 
-        _reportUploader.AddToSendBuffer(_stringBuilder.ToString());
+        string payload = stringBuilder.ToString();
+        _reportUploader.AddToSendBuffer(payload);
     }
 
 
@@ -479,17 +460,20 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
     {
         var serverTag = Configuration.ServerTag;
         var epochNow = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        _stringBuilder.Clear();
-        _stringBuilder.Append(id);
-        _stringBuilder.Append(",server=");
-        _stringBuilder.Append(serverTag);
+        var stringBuilder = _stringBuilder.Value;
 
-        serializer.Invoke(_stringBuilder, data);
+        stringBuilder.Clear();
+        stringBuilder.Append(id);
+        stringBuilder.Append(",server=");
+        stringBuilder.Append(serverTag);
 
-        _stringBuilder.Append(" ");
-        _stringBuilder.Append(epochNow);
+        serializer.Invoke(stringBuilder, data);
 
-        AddToSendBuffer(_stringBuilder.ToString());
+        stringBuilder.Append(" ");
+        stringBuilder.Append(epochNow);
+
+        string payload = stringBuilder.ToString();
+        AddToSendBuffer(payload);
     }
 
     public void AddToSendBuffer(string toString) => _reportUploader.AddToSendBuffer(toString);
@@ -574,14 +558,23 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
     private void StatusCommand(ConsoleSystem.Arg arg)
     {
-        _stringBuilder.Clear();
-        _stringBuilder.AppendLine("[ServerMetrics]: Status");
-        _stringBuilder.AppendLine("Overview");
-        _stringBuilder.Append("\tReady: "); _stringBuilder.Append(Ready); _stringBuilder.AppendLine();
-        _stringBuilder.AppendLine("Report Uploader:");
-        _stringBuilder.Append("\tRunning: "); _stringBuilder.Append(_reportUploader.IsRunning); _stringBuilder.AppendLine();
-        _stringBuilder.Append("\tIn Buffer: "); _stringBuilder.Append(_reportUploader.BufferSize); _stringBuilder.AppendLine();
-        arg.ReplyWith(_stringBuilder.ToString());
+        var stringBuilder = Pool.Get<StringBuilder>();
+
+        try
+        {
+            stringBuilder.AppendLine("[ServerMetrics]: Status");
+            stringBuilder.AppendLine("Overview");
+            stringBuilder.Append("\tReady: "); stringBuilder.Append(Ready); stringBuilder.AppendLine();
+            stringBuilder.AppendLine("Report Uploader:");
+            stringBuilder.Append("\tRunning: "); stringBuilder.Append(_reportUploader.IsRunning); stringBuilder.AppendLine();
+            stringBuilder.Append("\tIn Buffer: "); stringBuilder.Append(_reportUploader.BufferSize); stringBuilder.AppendLine();
+
+            arg.ReplyWith(stringBuilder.ToString());
+        }
+        finally
+        {
+            Pool.FreeUnmanaged(ref stringBuilder);
+        }
     }
 
     private void ReloadCfgCommand(ConsoleSystem.Arg arg)

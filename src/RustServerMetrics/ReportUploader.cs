@@ -15,6 +15,7 @@ internal class ReportUploader : MonoBehaviour
     private readonly Action _notifySubsequentHttpFailuresAction;
 
     private readonly Queue<string> _sendBuffer = new(SendBufferCapacity);
+    private readonly object _sendBufferLock = new object();
     private readonly StringBuilder _payloadBuilder = new();
 
     private bool _isRunning;
@@ -41,7 +42,20 @@ internal class ReportUploader : MonoBehaviour
     }
     
     public bool IsRunning => _isRunning;
-    public int BufferSize => _sendBuffer.Count;
+    public int BufferSize
+    {
+        get
+        {
+            int size;
+
+            lock (_sendBufferLock)
+            {
+                size = _sendBuffer.Count;
+            }
+
+            return size;
+        }
+    }
 
     public ReportUploader()
     {
@@ -66,12 +80,20 @@ internal class ReportUploader : MonoBehaviour
 
     public void AddToSendBuffer(string payload)
     {
-        if (_sendBuffer.Count == SendBufferCapacity)
+        lock (_sendBufferLock)
         {
-            _sendBuffer.Dequeue();
+            if (_sendBuffer.Count == SendBufferCapacity)
+            {
+                _sendBuffer.Dequeue();
+            }
+
+            _sendBuffer.Enqueue(payload);
         }
 
-        _sendBuffer.Enqueue(payload);
+        if (System.Threading.Thread.CurrentThread.ManagedThreadId != RustServerMetricsLoader._mainThreadId)
+        {
+            return;
+        }
 
         if (!_isRunning)
         {
@@ -84,12 +106,21 @@ internal class ReportUploader : MonoBehaviour
         _isRunning = true;
         yield return null;
 
-        while (_sendBuffer.Count > 0 && _isRunning)
+        int bufferSize;
+
+        while ((bufferSize = BufferSize) > 0 && _isRunning)
         {
-            var amountToTake = Mathf.Min(_sendBuffer.Count, BatchSize);
+            var amountToTake = Mathf.Min(bufferSize, BatchSize);
             for (var i = 0; i < amountToTake; i++)
             {
-                _payloadBuilder.Append(_sendBuffer.Dequeue());
+                string payload;
+
+                lock (_sendBufferLock)
+                {
+                    payload = _sendBuffer.Dequeue();
+                }
+
+                _payloadBuilder.Append(payload);
                 _payloadBuilder.Append("\n");
             }
             _attempt = 0;
