@@ -18,7 +18,7 @@ internal class ReportUploader : MonoBehaviour
     private readonly object _sendBufferLock = new object();
     private readonly StringBuilder _payloadBuilder = new();
 
-    private volatile bool _isRunning;
+    private bool _isRunning;
     private ushort _attempt;
     private byte[] _data;
     private Uri _uri;
@@ -103,7 +103,7 @@ internal class ReportUploader : MonoBehaviour
 
             if (bufferSize == 0)
             {
-                yield return CoroutineEx.waitForSecondsRealtime(1f);
+                yield return null;
                 continue;
             }
 
