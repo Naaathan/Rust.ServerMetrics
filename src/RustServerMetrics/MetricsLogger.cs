@@ -139,6 +139,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
     public void StartLoggingMetrics()
     {
+        InvokeRepeating(CheckBufferQueues, UnityEngine.Random.Range(0f, 1f), 1f);
         InvokeRepeating(LogNetworkUpdates, UnityEngine.Random.Range(0.25f, 0.75f), 0.5f);
 
         InvokeRepeating(ServerInvokes.SerializeToStringBuilder, UnityEngine.Random.Range(0f, 1f), 1f);
@@ -151,6 +152,19 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
     #endregion
 
+    internal void CheckBufferQueues()
+    {
+        var queueLengths = (Net.sv.ReadQueueLength, Net.sv.WriteQueueLength);
+
+        UploadPacket("network_buffers", queueLengths, (builder, lengths) =>
+        {
+            builder.Append(",read_queue_length=");
+            builder.Append(lengths.ReadQueueLength);
+            builder.Append("i write_queue_length=");
+            builder.Append(lengths.WriteQueueLength);
+            builder.Append("i");
+        });
+    }
 
     internal void OnPlayerInit(BasePlayer player)
     {
