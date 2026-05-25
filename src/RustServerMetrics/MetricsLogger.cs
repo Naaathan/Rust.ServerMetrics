@@ -5,6 +5,7 @@ using Newtonsoft.Json;
 using RustServerMetrics.Config;
 using RustServerMetrics.HarmonyPatches.Utility;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -34,6 +35,17 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
             Bytes = bytes;
         }
     }
+
+    private class PacketProfile
+    {
+        public string EntityType { get; set; }
+
+        public ulong NetId { get; set; }
+
+        public long Timestamp { get; set; }
+    }
+
+    private readonly ConcurrentQueue<PacketProfile> _packetProfiles = new();
 
     private readonly Dictionary<Message.Type, NetworkUpdateData> _networkUpdates = Enum.GetValues(typeof(Message.Type))
                                                                                        .Cast<Message.Type>()
@@ -140,6 +152,7 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
     public void StartLoggingMetrics()
     {
         InvokeRepeating(CheckBufferQueues, UnityEngine.Random.Range(0f, 1f), 1f);
+        InvokeRepeating(LogPacketsProfiled, UnityEngine.Random.Range(0f, 1f), 1f);
         InvokeRepeating(LogNetworkUpdates, UnityEngine.Random.Range(0.25f, 0.75f), 0.5f);
 
         InvokeRepeating(ServerInvokes.SerializeToStringBuilder, UnityEngine.Random.Range(0f, 1f), 1f);
@@ -216,13 +229,11 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         string entityType = net.GetType()?.Name;
         if (string.IsNullOrEmpty(entityType)) return;
 
-        UploadPacket("packet_profiler", net, (builder, entity) =>
+        _packetProfiles.Enqueue(new PacketProfile
         {
-            builder.Append(",entity_type=");
-            builder.Append(entityType);
-            builder.Append(" entity_id=");
-            builder.Append(entityId.Value);
-            builder.Append("i");
+            EntityType = entityType,
+            NetId = net.net.ID.Value,
+            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
         });
     }
 
@@ -293,6 +304,31 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
             builder.Append(Net.sv.GetStat(basePlayer.net.connection, BaseNetwork.StatTypeLong.PacketLossLastSecond));
             builder.Append("i ");
         });
+    }
+
+    private void LogPacketsProfiled()
+    {
+        if (_packetProfiles.Count < 1) return;
+        var serverTag = Configuration.ServerTag;
+        var stringBuilder = _stringBuilder.Value;
+
+        int max = 1000;
+
+        while (--max >= 0 && _packetProfiles.TryDequeue(out var packet))
+        {
+            stringBuilder.Clear();
+            stringBuilder.Append("packet_profiler,server=");
+            stringBuilder.Append(serverTag);
+            stringBuilder.Append(" entity_type=\"");
+            stringBuilder.Append(packet.EntityType);
+            stringBuilder.Append("\",entity_id=");
+            stringBuilder.Append(packet.NetId);
+            stringBuilder.Append("i ");
+            stringBuilder.Append(packet.Timestamp);
+
+            string payload = stringBuilder.ToString();
+            _reportUploader.AddToSendBuffer(payload);
+        }
     }
 
     private void LogNetworkUpdates()
