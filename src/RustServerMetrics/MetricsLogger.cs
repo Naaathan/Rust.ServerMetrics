@@ -36,13 +36,24 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         }
     }
 
-    private class PacketProfile
+    private class PacketProfile : Pool.IPooled
     {
         public string EntityType { get; set; }
 
         public ulong NetId { get; set; }
 
         public long Timestamp { get; set; }
+
+        public void EnterPool() => Reset();
+
+        public void LeavePool() => Reset();
+
+        public void Reset()
+        {
+            EntityType = null;
+            NetId = 0ul;
+            Timestamp = 0L;
+        }
     }
 
     private readonly ConcurrentQueue<PacketProfile> _packetProfiles = new();
@@ -145,6 +156,9 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
             return;
         }
 
+        Pool.ResizeBuffer<PacketProfile>(10000);
+        Pool.FillBuffer<PacketProfile>();
+
         StartLoggingMetrics();
         Ready = true;
     }
@@ -229,12 +243,12 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
         string entityType = net.GetType()?.Name;
         if (string.IsNullOrEmpty(entityType)) return;
 
-        _packetProfiles.Enqueue(new PacketProfile
-        {
-            EntityType = entityType,
-            NetId = net.net.ID.Value,
-            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-        });
+        var packetProfile = Pool.Get<PacketProfile>();
+        packetProfile.EntityType = entityType;
+        packetProfile.NetId = net.net.ID.Value;
+        packetProfile.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        _packetProfiles.Enqueue(packetProfile);
     }
 
     internal void OnOxidePluginMetrics(Dictionary<string, double> metrics)
@@ -316,18 +330,25 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
 
         while (--max >= 0 && _packetProfiles.TryDequeue(out var packet))
         {
-            stringBuilder.Clear();
-            stringBuilder.Append("packet_profiler,server=");
-            stringBuilder.Append(serverTag);
-            stringBuilder.Append(" entity_type=\"");
-            stringBuilder.Append(packet.EntityType);
-            stringBuilder.Append("\",entity_id=");
-            stringBuilder.Append(packet.NetId);
-            stringBuilder.Append("i ");
-            stringBuilder.Append(packet.Timestamp);
+            try
+            {
+                stringBuilder.Clear();
+                stringBuilder.Append("packet_profiler,server=");
+                stringBuilder.Append(serverTag);
+                stringBuilder.Append(" entity_type=\"");
+                stringBuilder.Append(packet.EntityType);
+                stringBuilder.Append("\",entity_id=");
+                stringBuilder.Append(packet.NetId);
+                stringBuilder.Append("i ");
+                stringBuilder.Append(packet.Timestamp);
 
-            string payload = stringBuilder.ToString();
-            _reportUploader.AddToSendBuffer(payload);
+                string payload = stringBuilder.ToString();
+                _reportUploader.AddToSendBuffer(payload);
+            }
+            finally
+            {
+                Pool.Free(ref packet);
+            }
         }
     }
 
