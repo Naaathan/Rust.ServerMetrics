@@ -335,9 +335,9 @@ public class MetricsLogger : SingletonComponent<MetricsLogger>
                 stringBuilder.Clear();
                 stringBuilder.Append("packet_profiler,server=");
                 stringBuilder.Append(serverTag);
-                stringBuilder.Append(" entity_type=\"");
+                stringBuilder.Append(",entity_type=\"");
                 stringBuilder.Append(packet.EntityType);
-                stringBuilder.Append("\",entity_id=");
+                stringBuilder.Append("\" entity_id=");
                 stringBuilder.Append(packet.NetId);
                 stringBuilder.Append("i ");
                 stringBuilder.Append(packet.Timestamp);
